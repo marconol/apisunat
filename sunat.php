@@ -1,83 +1,74 @@
 <?php
 
-/**
- * Consulta RUC en SUNAT (scraping)
- * Funciona en Coolify + PHP + Apache
- */
-
 function validarRuc(string $ruc): array
 {
     if (!preg_match('/^\d{11}$/', $ruc)) {
         throw new Exception('RUC inválido');
     }
 
-    $url = 'https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias';
+    $cookie = tempnam(sys_get_temp_dir(), 'sunat_');
 
+    // 1️⃣ Primer request (inicia sesión)
+    $ch = curl_init('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias');
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_COOKIEJAR => $cookie,
+        CURLOPT_COOKIEFILE => $cookie,
+        CURLOPT_USERAGENT => 'Mozilla/5.0',
+        CURLOPT_TIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => false,
+    ]);
+    curl_exec($ch);
+    curl_close($ch);
+
+    // 2️⃣ Segundo request (consulta real)
     $postData = http_build_query([
         'accion' => 'consPorRuc',
         'nroRuc' => $ruc,
     ]);
 
-    $ch = curl_init($url);
+    $ch = curl_init('https://e-consultaruc.sunat.gob.pe/cl-ti-itmrconsruc/jcrS00Alias');
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => $postData,
-        CURLOPT_USERAGENT => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        CURLOPT_COOKIEJAR => $cookie,
+        CURLOPT_COOKIEFILE => $cookie,
+        CURLOPT_USERAGENT => 'Mozilla/5.0',
         CURLOPT_TIMEOUT => 10,
         CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_FOLLOWLOCATION => true,
     ]);
 
     $html = curl_exec($ch);
+    curl_close($ch);
+    unlink($cookie);
 
-    if ($html === false) {
-        throw new Exception('Error conectando a SUNAT');
+    if (!$html || strlen($html) < 500) {
+        throw new Exception('SUNAT no respondió correctamente');
     }
 
-    curl_close($ch);
-
-    return parsearSunat($html);
+    return parsearSunatTexto($html);
 }
 
-function parsearSunat(string $html): array
+function limpiar(string $text): string
 {
-    libxml_use_internal_errors(true);
+    return trim(preg_replace('/\s+/', ' ', html_entity_decode($text)));
+}
 
-    $dom = new DOMDocument();
-    $dom->loadHTML($html);
-    $xp = new DOMXPath($dom);
-
-    $data = [
-        'razon_social' => '',
-        'estado'       => '',
-        'condicion'    => '',
-        'direccion'    => '',
-    ];
-
-    // Recorremos todas las filas de tablas
-    $rows = $xp->query("//tr");
-
-    foreach ($rows as $row) {
-        $cells = $row->getElementsByTagName('td');
-        if ($cells->length < 2) continue;
-
-        $label = strtoupper(trim(preg_replace('/\s+/', ' ', $cells->item(0)->textContent)));
-        $value = trim(preg_replace('/\s+/', ' ', $cells->item(1)->textContent));
-
-        if (str_contains($label, 'RAZÓN SOCIAL')) {
-            $data['razon_social'] = $value;
-        }
-        if (str_contains($label, 'ESTADO')) {
-            $data['estado'] = $value;
-        }
-        if (str_contains($label, 'CONDICIÓN')) {
-            $data['condicion'] = $value;
-        }
-        if (str_contains($label, 'DOMICILIO')) {
-            $data['direccion'] = $value;
-        }
+function extraer(string $html, string $label): string
+{
+    if (preg_match('/' . preg_quote($label, '/') . '\s*:\s*(.*?)</i', $html, $m)) {
+        return limpiar($m[1]);
     }
+    return '';
+}
 
-    return $data;
+function parsearSunatTexto(string $html): array
+{
+    return [
+        'razon_social' => extraer($html, 'Razón Social'),
+        'estado'       => extraer($html, 'Estado del Contribuyente'),
+        'condicion'    => extraer($html, 'Condición del Contribuyente'),
+        'direccion'    => extraer($html, 'Domicilio Fiscal'),
+    ];
 }
